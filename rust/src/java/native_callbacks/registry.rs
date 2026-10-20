@@ -19,7 +19,10 @@ pub fn ffi_native_bridge_get_registry_data_impl(
                 sound_events: sounds,
             })
         }
-        _ => unreachable!(),
+        other => {
+            tracing::warn!("get_registry_data: unsupported registry type {}", other);
+            return None;
+        }
     };
 
     Some(GetRegistryDataResponse {

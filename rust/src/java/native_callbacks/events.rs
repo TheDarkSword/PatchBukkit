@@ -22,7 +22,9 @@ pub fn ffi_native_bridge_call_event_impl(request: CallEventRequest) -> Option<Ca
 }
 
 pub fn ffi_native_bridge_register_event_impl(request: RegisterEventRequest) -> Option<()> {
-    let mut registered = REGISTERED_EVENTS.lock().unwrap();
+    let mut registered = REGISTERED_EVENTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if !registered.insert((request.plugin_name.clone(), request.event_type.clone())) {
         return Some(());
     }
