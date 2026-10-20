@@ -96,9 +96,12 @@ impl ServiceGenerator for FfiServiceGenerator {
 ///
 /// # Safety
 ///
-/// - `input_ptr` must be a valid pointer to `input_len` bytes of memory
-/// - `output_len` must be a valid pointer to write the output length
+/// - `input_ptr` must be a valid pointer to `input_len` bytes of memory, or may be null when `input_len` is 0
+/// - `output_len` must be a valid pointer to write the output length; if it is null nothing is called
 /// - The caller is responsible for freeing the returned pointer using `ffi_free_bytes`
+///
+/// A panic inside the implementation is caught and reported as a null result,
+/// since unwinding across `extern "C"` would abort the whole process.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn {fn_name}(
     input_ptr: *const u8,
@@ -106,23 +109,37 @@ pub unsafe extern "C" fn {fn_name}(
     output_len: *mut usize,
 ) -> *mut u8 {{
     use prost::Message;
-    if input_ptr.is_null() {{
-        tracing::warn!("{fn_name}: null input (ptr={{:?}}, len={{}})", input_ptr, input_len);
-        unsafe {{ *output_len = 0 }};
+    if output_len.is_null() {{
+        tracing::warn!("{fn_name}: null output_len");
         return std::ptr::null_mut();
     }}
-    let input_slice = if input_len == 0 {{
+    unsafe {{ *output_len = 0 }};
+    let input_slice: &[u8] = if input_len == 0 {{
         &[]
+    }} else if input_ptr.is_null() {{
+        tracing::warn!("{fn_name}: null input (len={{}})", input_len);
+        return std::ptr::null_mut();
     }} else {{
         unsafe {{ std::slice::from_raw_parts(input_ptr, input_len) }}
     }};
     let Ok(request) = {input_type}::decode(input_slice) else {{
         tracing::warn!("{fn_name}: failed to decode request");
-        unsafe {{ *output_len = 0 }};
         return std::ptr::null_mut();
     }};
-    let Some(response) = {0}::{fn_name}_impl(request) else {{
-        unsafe {{ *output_len = 0 }};
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {{
+        {0}::{fn_name}_impl(request)
+    }}));
+    let Ok(result) = outcome.map_err(|payload| {{
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("unknown panic");
+        tracing::error!("{fn_name}: panicked: {{}}", message);
+    }}) else {{
+        return std::ptr::null_mut();
+    }};
+    let Some(response) = result else {{
         return std::ptr::null_mut();
     }};
     let encoded = response.encode_to_vec().into_boxed_slice();
