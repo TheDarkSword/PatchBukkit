@@ -1,8 +1,10 @@
+use pumpkin::world::World;
 use pumpkin_util::math::vector3::Vector3;
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use crate::{
-    java::native_callbacks::CALLBACK_CONTEXT,
+    java::native_callbacks::{CALLBACK_CONTEXT, CallbackContext},
     proto::patchbukkit::{
         common::{EmptyRequest, Uuid as ProtoUuid},
         world::{
@@ -20,6 +22,32 @@ use crate::{
     },
 };
 
+static UNKNOWN_WORLDS_LOGGED: LazyLock<Mutex<HashSet<uuid::Uuid>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Returns the loaded Pumpkin world with this UUID. An unknown UUID (for example a
+/// world that only exists on the Paper side, or one that was unloaded) gives `None`
+/// instead of another world, and is logged once per UUID.
+fn find_world(ctx: &CallbackContext, world_uuid: uuid::Uuid) -> Option<Arc<World>> {
+    let world = ctx
+        .plugin_context
+        .server
+        .worlds
+        .load()
+        .iter()
+        .find(|w| w.uuid == world_uuid)
+        .cloned();
+    if world.is_none()
+        && UNKNOWN_WORLDS_LOGGED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(world_uuid)
+    {
+        tracing::warn!("No Pumpkin world with UUID {world_uuid}, ignoring the call");
+    }
+    world
+}
+
 pub fn ffi_native_bridge_get_block_data_impl(
     request: GetBlockDataRequest,
 ) -> Option<GetBlockDataResponse> {
@@ -27,12 +55,7 @@ pub fn ffi_native_bridge_get_block_data_impl(
     let uuid_str = &request.world_uuid.as_ref()?.value;
     let world_uuid = uuid::Uuid::parse_str(uuid_str).ok()?;
 
-    let worlds = ctx.plugin_context.server.worlds.load_full();
-    let world = worlds
-        .iter()
-        .find(|w| w.uuid == world_uuid)
-        .cloned()
-        .or_else(|| worlds.first().cloned())?;
+    let world = find_world(ctx, world_uuid)?;
     let pos = pumpkin_util::math::position::BlockPos::new(request.x, request.y, request.z);
 
     let state_id = world.get_block_state(&pos).id;
@@ -68,12 +91,7 @@ pub fn ffi_native_bridge_set_block_data_impl(request: SetBlockDataRequest) -> Op
     let uuid_str = &request.world_uuid.as_ref()?.value;
     let world_uuid = uuid::Uuid::parse_str(uuid_str).ok()?;
 
-    let worlds = ctx.plugin_context.server.worlds.load_full();
-    let world = worlds
-        .iter()
-        .find(|w| w.uuid == world_uuid)
-        .cloned()
-        .or_else(|| worlds.first().cloned())?;
+    let world = find_world(ctx, world_uuid)?;
     let pos = pumpkin_util::math::position::BlockPos::new(request.x, request.y, request.z);
 
     let block_state_str = request.block_state;
@@ -138,12 +156,7 @@ pub fn ffi_native_bridge_get_world_border_impl(
     let uuid_str = &request.world_uuid.as_ref()?.value;
     let world_uuid = uuid::Uuid::parse_str(uuid_str).ok()?;
 
-    let worlds = ctx.plugin_context.server.worlds.load_full();
-    let world = worlds
-        .iter()
-        .find(|w| w.uuid == world_uuid)
-        .cloned()
-        .or_else(|| worlds.first().cloned())?;
+    let world = find_world(ctx, world_uuid)?;
 
     let wb = world.worldborder.try_lock().ok()?;
 
@@ -167,12 +180,7 @@ pub fn ffi_native_bridge_set_world_border_impl(request: SetWorldBorderRequest) -
     let world_uuid = uuid::Uuid::parse_str(uuid_str).ok()?;
     let border_data = request.border?;
 
-    let worlds = ctx.plugin_context.server.worlds.load_full();
-    let world = worlds
-        .iter()
-        .find(|w| w.uuid == world_uuid)
-        .cloned()
-        .or_else(|| worlds.first().cloned())?;
+    let world = find_world(ctx, world_uuid)?;
 
     {
         let mut wb = world
@@ -201,12 +209,7 @@ pub fn ffi_native_bridge_get_world_info_impl(
     let uuid_str = &request.world_uuid.as_ref()?.value;
     let world_uuid = uuid::Uuid::parse_str(uuid_str).ok()?;
 
-    let worlds = ctx.plugin_context.server.worlds.load_full();
-    let world = worlds
-        .iter()
-        .find(|w| w.uuid == world_uuid)
-        .cloned()
-        .or_else(|| worlds.first().cloned())?;
+    let world = find_world(ctx, world_uuid)?;
 
     let min_height = world.dimension.min_y;
     let height = world.dimension.height;
@@ -277,12 +280,7 @@ pub fn ffi_native_bridge_set_world_time_impl(request: SetWorldTimeRequest) -> Op
     let uuid_str = &request.world_uuid.as_ref()?.value;
     let world_uuid = uuid::Uuid::parse_str(uuid_str).ok()?;
 
-    let worlds = ctx.plugin_context.server.worlds.load_full();
-    let world = worlds
-        .iter()
-        .find(|w| w.uuid == world_uuid)
-        .cloned()
-        .or_else(|| worlds.first().cloned())?;
+    let world = find_world(ctx, world_uuid)?;
 
     if let Ok(mut lt) = world.level_time.try_lock() {
         if request.time >= 0 {
@@ -300,12 +298,7 @@ pub fn ffi_native_bridge_set_world_weather_impl(request: SetWorldWeatherRequest)
     let uuid_str = &request.world_uuid.as_ref()?.value;
     let world_uuid = uuid::Uuid::parse_str(uuid_str).ok()?;
 
-    let worlds = ctx.plugin_context.server.worlds.load_full();
-    let world = worlds
-        .iter()
-        .find(|w| w.uuid == world_uuid)
-        .cloned()
-        .or_else(|| worlds.first().cloned())?;
+    let world = find_world(ctx, world_uuid)?;
 
     if let Ok(mut w) = world.weather.try_lock() {
         w.raining = request.storm;
@@ -328,12 +321,7 @@ pub fn ffi_native_bridge_set_world_spawn_impl(request: SetWorldSpawnRequest) -> 
     let uuid_str = &request.world_uuid.as_ref()?.value;
     let world_uuid = uuid::Uuid::parse_str(uuid_str).ok()?;
 
-    let worlds = ctx.plugin_context.server.worlds.load_full();
-    let world = worlds
-        .iter()
-        .find(|w| w.uuid == world_uuid)
-        .cloned()
-        .or_else(|| worlds.first().cloned())?;
+    let world = find_world(ctx, world_uuid)?;
 
     let mut level_data = (**world.level_info.load()).clone();
     level_data.spawn_x = request.x;
@@ -352,12 +340,7 @@ pub fn ffi_native_bridge_set_world_difficulty_impl(
     let uuid_str = &request.world_uuid.as_ref()?.value;
     let world_uuid = uuid::Uuid::parse_str(uuid_str).ok()?;
 
-    let worlds = ctx.plugin_context.server.worlds.load_full();
-    let world = worlds
-        .iter()
-        .find(|w| w.uuid == world_uuid)
-        .cloned()
-        .or_else(|| worlds.first().cloned())?;
+    let world = find_world(ctx, world_uuid)?;
 
     let diff = match request.difficulty.to_uppercase().as_str() {
         "PEACEFUL" => pumpkin_util::Difficulty::Peaceful,
@@ -401,12 +384,7 @@ pub fn ffi_native_bridge_get_world_entities_impl(
     let uuid_str = &request.world_uuid.as_ref()?.value;
     let world_uuid = uuid::Uuid::parse_str(uuid_str).ok()?;
 
-    let worlds = ctx.plugin_context.server.worlds.load_full();
-    let world = worlds
-        .iter()
-        .find(|w| w.uuid == world_uuid)
-        .cloned()
-        .or_else(|| worlds.first().cloned())?;
+    let world = find_world(ctx, world_uuid)?;
 
     let mut entities = Vec::new();
     for p in world.players.load().iter() {
@@ -456,12 +434,7 @@ pub fn ffi_native_bridge_spawn_world_entity_impl(
     let uuid_str = &request.world_uuid.as_ref()?.value;
     let world_uuid = uuid::Uuid::parse_str(uuid_str).ok()?;
 
-    let worlds = ctx.plugin_context.server.worlds.load_full();
-    let world = worlds
-        .iter()
-        .find(|w| w.uuid == world_uuid)
-        .cloned()
-        .or_else(|| worlds.first().cloned())?;
+    let world = find_world(ctx, world_uuid)?;
 
     let new_uuid = if let Some(ref u) = request.entity_uuid {
         uuid::Uuid::parse_str(&u.value).unwrap_or_else(|_| uuid::Uuid::new_v4())
@@ -506,12 +479,7 @@ pub fn ffi_native_bridge_create_world_explosion_impl(
     let uuid_str = &request.world_uuid.as_ref()?.value;
     let world_uuid = uuid::Uuid::parse_str(uuid_str).ok()?;
 
-    let worlds = ctx.plugin_context.server.worlds.load_full();
-    let world = worlds
-        .iter()
-        .find(|w| w.uuid == world_uuid)
-        .cloned()
-        .or_else(|| worlds.first().cloned())?;
+    let world = find_world(ctx, world_uuid)?;
 
     let pos = Vector3::new(request.x, request.y, request.z);
     let power = request.power;
@@ -531,12 +499,7 @@ pub fn ffi_native_bridge_play_world_sound_impl(request: PlayWorldSoundRequest) -
     let uuid_str = &request.world_uuid.as_ref()?.value;
     let world_uuid = uuid::Uuid::parse_str(uuid_str).ok()?;
 
-    let worlds = ctx.plugin_context.server.worlds.load_full();
-    let world = worlds
-        .iter()
-        .find(|w| w.uuid == world_uuid)
-        .cloned()
-        .or_else(|| worlds.first().cloned())?;
+    let world = find_world(ctx, world_uuid)?;
 
     let pos = Vector3::new(request.x, request.y, request.z);
     let sound_name = request.sound;
@@ -560,12 +523,7 @@ pub fn ffi_native_bridge_set_chunk_force_loaded_impl(
     let uuid_str = &request.world_uuid.as_ref()?.value;
     let world_uuid = uuid::Uuid::parse_str(uuid_str).ok()?;
 
-    let worlds = ctx.plugin_context.server.worlds.load_full();
-    let world = worlds
-        .iter()
-        .find(|w| w.uuid == world_uuid)
-        .cloned()
-        .or_else(|| worlds.first().cloned())?;
+    let world = find_world(ctx, world_uuid)?;
 
     let coord = pumpkin_util::math::vector2::Vector2::new(request.x, request.z);
     if let Ok(mut forced) = world.forced_chunks.lock() {
@@ -586,12 +544,7 @@ pub fn ffi_native_bridge_get_force_loaded_chunks_impl(
     let uuid_str = &request.world_uuid.as_ref()?.value;
     let world_uuid = uuid::Uuid::parse_str(uuid_str).ok()?;
 
-    let worlds = ctx.plugin_context.server.worlds.load_full();
-    let world = worlds
-        .iter()
-        .find(|w| w.uuid == world_uuid)
-        .cloned()
-        .or_else(|| worlds.first().cloned())?;
+    let world = find_world(ctx, world_uuid)?;
 
     let mut chunks = Vec::new();
     if let Ok(forced) = world.forced_chunks.lock() {
@@ -611,12 +564,7 @@ pub fn ffi_native_bridge_save_world_impl(request: SaveWorldRequest) -> Option<()
     let uuid_str = &request.world_uuid.as_ref()?.value;
     let world_uuid = uuid::Uuid::parse_str(uuid_str).ok()?;
 
-    let worlds = ctx.plugin_context.server.worlds.load_full();
-    let world = worlds
-        .iter()
-        .find(|w| w.uuid == world_uuid)
-        .cloned()
-        .or_else(|| worlds.first().cloned())?;
+    let world = find_world(ctx, world_uuid)?;
 
     ctx.runtime.spawn(async move {
         let _ = world.save().await;
